@@ -1,0 +1,385 @@
+---
+title: "Storm Events Exhibiting Greatest Health or Economic Impact"
+output: 
+  html_document:
+    keep_md: true
+author: Peter Mere
+---
+
+***
+## Synopsis
+
+We examine storm data from the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database in order to assess:  
+
+1. Which types of storm events are most harmful with respect to population health, and  
+2. Which types of events have the greatest economic consequences.  
+
+The data spans more than 50 years of US storm records, but due to changing categorisation methods and an increasing scope of events recorded we examine only the period 2003 to 2011 inclusive.  
+
+We answer each question in two ways:  
+
+1. Which events have the greatest impact overall.  
+2. Which storm event type is likely to have the greatest impact per instance.
+  
+
+We find the following for the nine year period studied:
+
+Area                              | Largest overall        | Largest per reported instance         | Notes                                               
+--------------------------------- | ---------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------
+FATALITIES      | TORNADO 1,057 fatalities (23% of total) | RIP CURRENT 0.79 fatalities per event          | Rip currents not involving people are not reported.  Next highest is EXCESSIVE HEAT with 0.68 fatalities per event.
+INJURIES        | TORNADO 12,620 injuries (48% of total) | EXCESSIVE HEAT 3.15 injuries per event       | .                                                    
+PROPERTY DAMAGE | FLOOD US$133B damage (43% of total)   | HURRICANE/TYPHOON US$597M per event | .                                                    
+CROP DAMAGE     | DROUGHT US$4.7B damage (28% of total) | DROUGHT (US$2.77M per event)          | HURRICANE/TYPHOON had US$23M average per event, but this was only significant to 8%.
+
+
+***
+## Data Processing
+
+The data was downloaded from the NOAA website on 22 April 2015 and loaded into an R data.table.  
+
+```{r, results='hide'}
+# Set the working directory...
+dir.create(file.path('~','NOAAStormEvents'))
+setwd(file.path('~','NOAAStormEvents'))
+
+# Load packages
+require('data.table')
+require('lubridate')
+require('stringr')
+require('ggplot2')
+
+## Get the data.
+# Only download the bz2 file if it hasnot already been downloaded
+rawZipFile <- 'NOAA_StormData.csv.bz2'
+if (!file.exists(rawZipFile)) {
+        download.file('http://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2',
+              destfile = rawZipFile, mode = 'wb')
+}
+```
+
+```{r, cache=TRUE}
+# Unzip and put it in a data.table.
+setwd(file.path('~','NOAAStormEvents'))
+stormData <- as.data.table(read.csv(rawZipFile))
+```
+
+On examining the data it was found that the number of unique event type codes far in excess of the 48 listed in the [NOAA Storm Data Documentation](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf).  Some of this was due to inconsistent use of upper/lower cases and leading/trailing white space, but more were due to typograpical errors, incorrect use of the EVTYPE field, and (seemngly) made-up event types.
+
+Correcting for the case and white space, and examining the number of event types used per year shows the following.
+
+```{r}
+# Fix leading/trailing white space and case, then check again.
+stormData <- stormData[,EVTYPE := str_trim(toupper(EVTYPE))]
+
+# Look at the number of different EVTYPE values per year.
+uniqueEVTYPEperYear <- stormData[,list(evtypes = length(unique(EVTYPE)),.N), 
+                                 by=year(mdy_hms(stormData$BGN_DATE))][order(year)]
+print(qplot(uniqueEVTYPEperYear$year, uniqueEVTYPEperYear$evtypes, 
+     xlab = 'Year', ylab = 'Unique EVTYPE'))
+
+```
+
+The plot above shows that prior to 1993 only three descriptors were used.  Also, something happened in 1993 that caused a dramatic increase in the number of different EVTYPE descriptors used.  This was brought under control by 2003, from which year the number of descriptors used seems reasonably constant.
+
+```{r}
+# What was used from 2003 onwards?
+post2002EVTYPES <- unique(
+        stormData$EVTYPE[year(mdy_hms(stormData$BGN_DATE)) > 2002])
+numEvents <- dim(stormData)[1]
+post2002EVTYPEcount <- length(post2002EVTYPES)
+post2002pct <- round(100 * numEvents / dim(stormData)[1], 0)
+```
+
+There were `r post2002EVTYPEcount` EVTYPE descriptors used since 2003, but they all appear to be part of the 48 listed in the NOAA document, or are easily mappable them.  Additionally, this subset contains `r post2002pct`% (`r numEvents` events) of the whole dataset, so only the data in this 2003 to 2011 (inclusive) period was used in this analysis.
+
+```{r}
+# Remove all previous data from the data table.
+stormData <- stormData[year(mdy_hms(stormData$BGN_DATE)) > 2002]
+```
+
+The `r post2002EVTYPEcount` EVTYPES in the newly reduced dataset still exceeds the offical list of 48.  The descriptors **not** from the official list are:  
+```{r}
+        # This data drawn from the NOAA file linked above.
+officialEVTYPEs <- fread('allowedEVTYPE.txt', sep = '\n', header = FALSE, 
+                         stringsAsFactors = FALSE)
+setnames(officialEVTYPEs, names(officialEVTYPEs), 'EVTYPE')
+invalidEVTYPEsPost2002 <- post2002EVTYPES[
+        !(post2002EVTYPES %in% officialEVTYPEs$EVTYPE)]
+invalidEVTYPEsPost2002
+```
+There are only `r length(invalidEVTYPEsPost2002)` descriptors that are wrong, and those had clear mappings to the official descriptors.  These mappings were made so all event types in the cut-down data set were drawn from the official list of 48.
+
+```{r, results='hide'}
+# Map the erroneous EVTYPE descriptors to the correct official descriptor.
+# e.g. 'ABNORMALLY DRY' is renamed to 'DROUGHT'
+setkey(stormData, EVTYPE)
+stormData['ABNORMALLY DRY',                     EVTYPE := 'DROUGHT']
+setkey(stormData, EVTYPE)
+stormData['ASTRONOMICAL HIGH TIDE',             EVTYPE := 'HIGH SURF']
+setkey(stormData, EVTYPE)
+stormData['COASTAL FLOODING',                   EVTYPE := 'COASTAL FLOOD']
+setkey(stormData, EVTYPE)
+stormData['COLD WIND CHILL TEMPERATURES',       EVTYPE := 'COLD/WIND CHILL']
+setkey(stormData, EVTYPE)
+stormData['EXTREME COLD',                       EVTYPE := 'EXTREME COLD/WIND CHILL']
+setkey(stormData, EVTYPE)
+stormData['EXTREME WINDCHILL',                  EVTYPE := 'EXTREME COLD/WIND CHILL']
+setkey(stormData, EVTYPE)
+stormData['FOG',                                EVTYPE := 'DENSE FOG']
+setkey(stormData, EVTYPE)
+stormData['FREEZING RAIN',                      EVTYPE := 'WINTER WEATHER']
+setkey(stormData, EVTYPE)
+stormData['HEAVY SURF/HIGH SURF',               EVTYPE := 'HIGH SURF']
+setkey(stormData, EVTYPE)
+stormData['HURRICANE',                          EVTYPE := 'HURRICANE/TYPHOON']
+setkey(stormData, EVTYPE)
+stormData['LANDSLIDE',                          EVTYPE := 'DEBRIS FLOW']
+setkey(stormData, EVTYPE)
+stormData['MARINE TSTM WIND',                   EVTYPE := 'MARINE THUNDERSTORM WIND']
+setkey(stormData, EVTYPE)
+stormData['PROLONG COLD',                       EVTYPE := 'COLD/WIND CHILL']
+setkey(stormData, EVTYPE)
+stormData['RIP CURRENTS',                       EVTYPE := 'RIP CURRENT']
+setkey(stormData, EVTYPE)
+stormData['SLEET STORM',                        EVTYPE := 'SLEET']
+setkey(stormData, EVTYPE)
+stormData['SNOW',                               EVTYPE := 'HEAVY SNOW']
+setkey(stormData, EVTYPE)
+stormData['STORM SURGE',                        EVTYPE := 'STORM TIDE']
+setkey(stormData, EVTYPE)
+stormData['STORM SURGE/TIDE',                   EVTYPE := 'STORM TIDE']
+setkey(stormData, EVTYPE)
+stormData['TSTM WIND',                          EVTYPE := 'THUNDERSTORM WIND']
+setkey(stormData, EVTYPE)
+stormData['TSTM WIND/HAIL',                     EVTYPE := 'THUNDERSTORM WIND']
+setkey(stormData, EVTYPE)
+stormData['UNSEASONABLY COLD',                  EVTYPE := 'COLD/WIND CHILL']
+setkey(stormData, EVTYPE)
+stormData['URBAN/SML STREAM FLD',               EVTYPE := 'HEAVY RAIN']
+setkey(stormData, EVTYPE)
+stormData['VOLCANIC ASHFALL',                   EVTYPE := 'VOLCANIC ASH']
+setkey(stormData, EVTYPE)
+stormData['WILD/FOREST FIRE',                   EVTYPE := 'WILDFIRE']
+setkey(stormData, EVTYPE)
+stormData['WINTER WEATHER/MIX',                 EVTYPE := 'WINTER WEATHER']
+setkey(stormData, EVTYPE)
+```
+
+Check that the data are now clean.
+
+```{r}
+post2002EVTYPES_fixed <- unique(
+        stormData$EVTYPE[year(mdy_hms(stormData$BGN_DATE)) > 2002])
+
+invalidEVTYPEsPost2002_fixed <- post2002EVTYPES_fixed[
+        !(post2002EVTYPES_fixed %in% officialEVTYPEs$EVTYPE)]
+
+invalidEVTYPEsPost2002_fixed
+
+# Light is green: trap is clean.  https://www.youtube.com/watch?v=aLwKMkdVMnQ
+```
+
+We examined the fatality and injury counts to ensure that they were numeric, non-negative, and sensible (i.e. had more small counts than large, and there were far fewer fatalities than there were injuries).  They were.  
+```{r}
+# Are they all numeric?
+is.numeric(unique(stormData[, FATALITIES]))
+is.numeric(unique(stormData[, INJURIES]))
+# All numeric = good.
+```
+  
+Do the numbers look sensible?  
+```{r}
+stormData[, .N, by = FATALITIES][order(FATALITIES)]
+stormData[, .N, by = INJURIES][order(INJURIES)]
+# Yep, all >=0, far more small counts than large, and FATALITIES << INJURIES.
+```
+
+We also examined the property and crop cost numbers and 'exponents' and found that they too were sensible.
+```{r}
+# NB: Estimates [of damage cost] should be rounded to three significant digits, 
+# followed by an alphabetical character signifying the magnitude of the number, 
+# i.e., 1.55B for $1,550,000,000. Alphabetical characters used to signify 
+# magnitude include "K" for thousands, "M" for millions, and "B" for billions.
+
+# Property damage
+is.numeric(stormData$PROPDMG)
+stormData[PROPDMG != 0, .(totPrpDmg = sum(PROPDMG), .N), 
+          by = PROPDMGEXP][order(-totPrpDmg)]
+# Good.
+
+# Crop damage
+is.numeric(stormData$CROPDMG)
+stormData[CROPDMG != 0, .(totCrpDmg = sum(CROPDMG), .N), 
+          by = CROPDMGEXP][order(-totCrpDmg)]
+# Good.
+```
+
+To make the economic impact estimates usable, the raw numbers in units of thousands, millions, or billions were converted into dollars.
+
+```{r, results='hide'}
+# Update the damage cost estimates to be in the same units.
+stormData[, PROPDMG_dollars := 0]
+setkey(stormData, PROPDMGEXP)
+stormData['K', PROPDMG_dollars := 1000 * PROPDMG]
+stormData['M', PROPDMG_dollars := 1000000 * PROPDMG]
+stormData['B', PROPDMG_dollars := 1000000000 * PROPDMG]
+
+stormData[, CROPDMG_dollars := 0]
+setkey(stormData, CROPDMGEXP)
+stormData['K', CROPDMG_dollars := 1000 * CROPDMG]
+stormData['M', CROPDMG_dollars := 1000000 * CROPDMG]
+stormData['B', CROPDMG_dollars := 1000000000 * CROPDMG]
+```
+
+***
+## Results  
+
+It should be noted that while the storm records are entered (for the most part) by trained people, there are significant biases in the data.  For example, a RIP CURRENT will not be reported unless someone or someone's property is caught up in it, but a TORNADO can easily be seen and reported even if it does not damage.  The result is that the RIP CURRENT event appears to be more dangerous than it actually is.  
+
+Additionally, some biases are introduced by the observation rules.  For example, section 2.7 of the NOAA Storm Documentation has the following to say about recording event economic impact estimates:  
+
+*If this estimate is not available, then the preparer has two choices: either check the "no information available" box, or make an estimate. The exception is for flood events. The Storm Data preparer must enter monetary damage amounts for flood events, even if it is a "guesstimate."*  
+
+This means that there will be a tendency for FLOOD event damages to appear greater than those for other event types, and for FLOOD event damage values to be less accurate.  
+
+Nonetheless, presented below are the top five event type descriptors contributing:  
+
+1. The highest number of injuries or fatalities, or value of property or crop damage, and  
+2. The highest expected number of injuries or fatalities, or property or crop damage value per event.  
+
+### INJURIES
+```{r}
+
+overallInjCount <- sum(stormData$INJURIES)
+
+top5injury.total <- stormData[, .(Total = sum(INJURIES),
+                               PercentOfAll = round(100 * sum(INJURIES) / overallInjCount, 1),
+                               Mean = round(mean(INJURIES), 2),
+                               Pval_mean = round(t.test(INJURIES, rep(0, .N))$p.value, 4),
+                               Median = median(INJURIES),
+                               Max = max(INJURIES),
+                               Events = .N),
+                           by = EVTYPE][order(-Total)][1:5]
+
+top5injury.mean <- stormData[, .(Total = sum(INJURIES),
+                               PercentOfAll = round(100 * sum(INJURIES) / overallInjCount, 1),
+                               Mean = round(mean(INJURIES), 2),
+                               Pval_mean = round(t.test(INJURIES, rep(0, .N))$p.value, 4),
+                               Median = median(INJURIES),
+                               Max = max(INJURIES),
+                               Events = .N),
+                           by = EVTYPE][order(-Mean)][1:5]
+
+```
+  
+Total injury count.  
+```{r}
+top5injury.total
+```
+  
+Expected injury count.
+```{r}
+top5injury.mean
+```
+
+### FATALITIES  
+```{r}
+overallFatalCount <- sum(stormData$FATALITIES)
+
+top5fatalities.total <- stormData[, .(Total = sum(FATALITIES),
+                               PercentOfAll = round(100 * sum(FATALITIES) / overallFatalCount, 1),
+                               Mean = round(mean(FATALITIES), 2),
+                               Pval_mean = round(t.test(FATALITIES, rep(0, .N))$p.value, 4),
+                               Median = median(FATALITIES),
+                               Max = max(FATALITIES),
+                               Events = .N),
+                           by = EVTYPE][order(-Total)][1:5]
+
+top5fatalities.mean <- stormData[, .(Total = sum(FATALITIES),
+                               PercentOfAll = round(100 * sum(FATALITIES) / overallFatalCount, 1),
+                               Mean = round(mean(FATALITIES), 2),
+                               Pval_mean = round(t.test(FATALITIES, rep(0, .N))$p.value, 4),
+                               Median = median(FATALITIES),
+                               Max = max(FATALITIES),
+                               Events = .N),
+                           by = EVTYPE][order(-Mean)][1:5]
+```
+  
+Total fatality count.  
+```{r}
+top5fatalities.total
+```
+  
+Expected fatality count.
+```{r}
+top5fatalities.mean
+```
+  
+### PROPERTY DAMAGE  
+```{r}
+overallPropDmgSum <- sum(stormData$PROPDMG_dollars)
+
+top5propDmg.total <- stormData[, .(Total = sum(PROPDMG_dollars),
+                               PercentOfAll = round(100 * sum(PROPDMG_dollars) / overallPropDmgSum, 1),
+                               Mean = round(mean(PROPDMG_dollars), 0),
+                               Pval_mean = round(t.test(PROPDMG_dollars, rep(0, .N))$p.value, 4),
+                               Median = median(PROPDMG_dollars),
+                               Max = max(PROPDMG_dollars), 
+                               Events = .N),
+                             by = EVTYPE][order(-Total)][1:5]
+
+
+top5propDmg.mean <- stormData[, .(Total = sum(PROPDMG_dollars),
+                               PercentOfAll = round(100 * sum(PROPDMG_dollars) / overallPropDmgSum, 1),
+                               Mean = round(mean(PROPDMG_dollars), 0),
+                               Pval_mean = round(t.test(PROPDMG_dollars, rep(0, .N))$p.value, 4),
+                               Median = median(PROPDMG_dollars),
+                               Max = max(PROPDMG_dollars), 
+                               Events = .N),
+                             by = EVTYPE][order(-Mean)][1:5]
+```
+  
+Total property damage value.  
+```{r}
+top5propDmg.total
+```
+  
+Expected property damage value.
+```{r}
+top5propDmg.mean
+```
+  
+  
+### CROP DAMAGE  
+```{r}
+overallCropDmgSum <- sum(stormData$CROPDMG_dollars)
+
+top5cropDmg.total <- stormData[, .(Total = sum(CROPDMG_dollars),
+                               PercentOfAll = round(100 * sum(CROPDMG_dollars) / overallCropDmgSum, 1),
+                               Mean = round(mean(CROPDMG_dollars), 0),
+                               Pval_mean = round(t.test(CROPDMG_dollars, rep(0, .N))$p.value, 4),
+                               Median = median(CROPDMG_dollars),
+                               Max = max(CROPDMG_dollars), 
+                               Events = .N),
+                             by = EVTYPE][order(-Total)][1:5]
+
+top5cropDmg.mean <- stormData[, .(Total = sum(CROPDMG_dollars),
+                               PercentOfAll = round(100 * sum(CROPDMG_dollars) / overallCropDmgSum, 1),
+                               Mean = round(mean(CROPDMG_dollars), 0),
+                               Pval_mean = round(t.test(CROPDMG_dollars, rep(0, .N))$p.value, 4),
+                               Median = median(CROPDMG_dollars),
+                               Max = max(CROPDMG_dollars), 
+                               Events = .N),
+                             by = EVTYPE][order(-Mean)][1:5]
+```
+  
+Total crop damage value.  
+```{r}
+top5cropDmg.total
+```
+  
+Expected crop damage value.
+```{r}
+top5cropDmg.mean
+```
+  
